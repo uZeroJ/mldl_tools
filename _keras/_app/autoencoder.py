@@ -8,10 +8,12 @@ import numpy as np
 from keras.datasets.mnist import load_data
 from keras.layers import Input, Dense
 from keras.layers import Conv2D, MaxPool2D, UpSampling2D
-from keras.layers import LSTM, RepeatVector
+from keras.layers import LSTM, RepeatVector, Lambda
 from keras.models import Model
 from keras.regularizers import l1
+from keras.metrics import binary_crossentropy
 from keras.callbacks import TensorBoard
+import keras.backend as K
 
 # Compression factor is 24.5
 ENCODE_DIM = 32
@@ -167,11 +169,56 @@ def get_seq_model():
 
     return seq_autoencoder, seq_encoder, seq_decoder
 
-def get_vae_model():
+
+def get_vae_model(batch_size=32):
     """
     Get Variational AutoEncoder model.
     :return: models of (autoencoder,
     """
+    INTER_HSIZE = 128
+    LATENT_HSIZE = 2
+    ALPHA = 0.5
+
+    x = Input(shape=(INPUT_DIM,))
+    inter = Dense(INTER_HSIZE, activation='relu')(x)
+
+    z_mean = Dense(LATENT_HSIZE)(inter)
+    z_log_var = Dense(LATENT_HSIZE)(inter)
+
+    def sampling(arg):
+        mean, var = arg
+        rn = K.random_normal(shape=(batch_size, LATENT_HSIZE),
+                             mean=0., stddev=1.)
+        z = mean + K.exp(var / 2) * rn
+        return z
+
+    z = Lambda(sampling, output_shape=(INPUT_DIM,))([z_mean, z_log_var])
+
+    # Decode from sampled data as it is generated from encoded latent
+    # distribution.
+    dec_inter = Dense(INTER_HSIZE, activation='relu', name='dec_inter')(z)
+    # Reconstruct from mean value.
+    dec_mean = Dense(INPUT_DIM, activation='simgoid', name='dec_mean')(
+        dec_inter)
+
+    vae_model = Model(x, dec_mean)
+    x_loss = INPUT_DIM * binary_crossentropy(x, dec_mean)
+    kl_loss = - ALPHA * K.sum(1 + z_log_var
+                              - K.square(z_mean)
+                              - K.exp(z_log_var), axis=-1)
+    vae_loss = K.mean(x_loss + kl_loss)
+    vae_model.compile(optimizer='rmsprop', loss=vae_loss)
+    # vae_model.summary()
+
+    vae_enc = Model(x, z_mean)
+
+    # The decoder
+    dec_inp = Input(shape=(LATENT_HSIZE,))
+    new_dec_inter = vae_model.get_layer('dec_inter')(dec_inp)
+    new_dec_mean = vae_model.get_layer('dec_mean')(new_dec_inter)
+    vae_gen = Model(dec_inp, new_dec_mean)
+
+    return vae_model, vae_enc, vae_gen
 
 
 def get_mnist_data(cnn=False, noisy=False):
@@ -213,25 +260,36 @@ def get_mnist_data(cnn=False, noisy=False):
 
 
 def train_autoencoder(model, X_train, X_test, noisy=False,
-                      epoch=50, batch_size=256, call_back_dir=None):
-    # train_data, test_data = X_train, X_test
-    if noisy:
-        train_lbl, test_lbl = get_mnist_data(noisy=noisy)
+                      epoch=50, batch_size=256, call_back_dir=None,
+                      vae=False):
+    if vae:
+        # Self-defined loss function
+        # def vae_loss(alpha=0.5):
+        # TODO, Why product dimension here?
+        # x_loss = INPUT_DIM * binary_crossentropy(vae.input,
+        #                                          vae.output)
+        # kl_loss = - alpha *
+        raise NotImplementedError('Need to split loss function from the '
+                                  'defined layers!')
     else:
-        train_lbl, test_lbl = X_train, X_test
+        # train_data, test_data = X_train, X_test
+        if noisy:
+            train_lbl, test_lbl = get_mnist_data(noisy=noisy)
+        else:
+            train_lbl, test_lbl = X_train, X_test
 
-    if call_back_dir:
-        cbks = [TensorBoard(log_dir=call_back_dir)]
-    else:
-        cbks = None
+        if call_back_dir:
+            cbks = [TensorBoard(log_dir=call_back_dir)]
+        else:
+            cbks = None
 
-    model.compile('adadelta', 'binary_crossentropy')
-    model.fit(X_train, train_lbl,
-              epochs=epoch,
-              batch_size=batch_size,
-              shuffle=True,
-              validation_data=(X_test, test_lbl),
-              callbacks=cbks)
+        model.compile('adadelta', 'binary_crossentropy')
+        model.fit(X_train, train_lbl,
+                  epochs=epoch,
+                  batch_size=batch_size,
+                  shuffle=True,
+                  validation_data=(X_test, test_lbl),
+                  callbacks=cbks)
 
 
 def predict(model, X_test):
@@ -270,6 +328,7 @@ def plot_decoded(raw_input, decoded):
 
 
 if __name__ == '__main__':
+    get_vae_model()
     use_cnn = True
     use_sp = False
     use_deep = False
